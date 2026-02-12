@@ -161,29 +161,34 @@ public:
 private:
     void worker() {
         for(;;) {
+            // Waiting events
+            {
+                std::unique_lock<std::mutex> lk(this->m_);
+                cv_.wait(lk, [&]{ return !tasks.empty() || stop_.load(std::memory_order_acquire); });
+            }
+
+            if(this->stop_.load(std::memory_order_acquire)) [[unlikely]] break;
+
             // Acquire the task
             std::shared_ptr<Task> candidate;
             {
-                std::unique_lock<std::mutex> lk(m_);
-                cv_.wait(lk, [&]{ return !tasks.empty() || stop_.load(std::memory_order_acquire); });
-
-                if(this->stop_.load(std::memory_order_acquire)) [[unlikely]] break;
-
+                std::lock_guard<std::mutex> lk(this->m_);
                 while (!tasks.empty()) {
                     candidate = tasks.top();
                     tasks.pop();
 
-                    if (candidate->state.load(std::memory_order_acquire) == Task::Cancel) {
-                        candidate.reset();
-                        continue;
-                    }
-                    break;  // Got a valid task, exit loop
+                    if (candidate->state.load(std::memory_order_acquire) == Task::Cancel)
+                        continue;  // Lazy GC
+                    else
+                        break;     // Got a valid task, exit loop
                 }
             }
 
+            // Finish task
             if(candidate) {
                 candidate->state.store(Task::State::Running, std::memory_order_release);
                 candidate->func();  // std::packaged_task will handle exception
+                candidate->state.store(Task::State::Done, std::memory_order_release);
             }
         }
     };
